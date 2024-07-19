@@ -1,3 +1,7 @@
+const CLIENT_EMAIL="xxx@xxxx.iam.gserviceaccount.com";
+const API_KEY="Bearer sk-xxxxx";
+const PRIVATE_KEY="xxx";
+const PROJECT="xxxx";
 const MODELS = {
     "claude-3-opus": {
         vertexName: "claude-3-opus@20240229",
@@ -49,9 +53,9 @@ async function handleRequest(request) {
         return createErrorResponse(405, "invalid_request_error", "GET method is not allowed");
     }
 
-    const apiKey = request.headers.get("x-api-key");
+    const apiKey = request.headers.get("Authorization");
     if (!API_KEY || API_KEY !== apiKey) {
-        return createErrorResponse(401, "authentication_error", "invalid x-api-key");
+        return createErrorResponse(401, "authentication_error", "invalid API-Key");
     }
 
     const signedJWT = await createSignedJWT(CLIENT_EMAIL, PRIVATE_KEY)
@@ -67,6 +71,7 @@ async function handleRequest(request) {
         switch(normalizedPathname) {
             case "/v1/v1/messages":
             case "/v1/messages":
+            case "/v1/chat/completions":
             case "/messages":
                 return handleMessagesEndpoint(request, token);
             default:
@@ -77,6 +82,77 @@ async function handleRequest(request) {
         return createErrorResponse(500, "api_error", "An unexpected error occurred");
     }
 }
+
+function genOpenAiResp(content,model) {
+    if (typeof content === "string") {
+        return {
+        id: "chatcmpl-abc123",
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1e3),
+        model: model,
+        choices: [
+            {
+            message: { role: "assistant", content },
+            finish_reason: "stop",
+            index: 0,
+            logprobs: null
+            }
+        ]
+        };
+    }
+    return {
+        id: "chatcmpl-abc123",
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1e3),
+        model: model,
+        choices: [
+        {
+            message: {
+            role: "assistant",
+            content: null,
+            function_call: {
+                name: content.name ?? "",
+                arguments: JSON.stringify(content.args)
+            }
+            },
+            finish_reason: "function_call",
+            index: 0,
+            logprobs: null
+        }
+        ]
+    };
+}
+
+function genStreamOpenAiResp(content, stop,model) {
+    if (typeof content === "string") {
+      return {
+        id: "chatcmpl-abc123",
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1e3),
+        model: model,
+        choices: [
+          {
+            delta: { role: "assistant", content },
+            finish_reason: stop ? "stop" : null,
+            index: 0
+          }
+        ]
+      };
+    }
+    return {
+      id: "chatcmpl-abc123",
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1e3),
+      model: model,
+      choices: [
+        {
+          delta: { role: "assistant", function_call: content },
+          finish_reason: stop ? "function_call" : null,
+          index: 0
+        }
+      ]
+    };
+  }
  
 async function handleMessagesEndpoint(request, api_token) {
     const anthropicVersion = request.headers.get('anthropic-version');
@@ -92,7 +168,9 @@ async function handleMessagesEndpoint(request, api_token) {
     }
 
     payload.anthropic_version = "vertex-2023-10-16";
-
+    if (!payload.max_tokens) {
+        payload.max_tokens=4096;
+    }
     if (!payload.model) {
         return createErrorResponse(400, "invalid_request_error", "Missing model in the request payload.");
     } else if (!MODELS[payload.model]) {
@@ -136,11 +214,14 @@ async function handleMessagesEndpoint(request, api_token) {
                 buffer = eventList.pop();
 
                 for (let event of eventList) {
-                    controller.enqueue(encoder.encode(`${event}\n\n`));
+                    //const responseJson = JSON.parse(event.data);
+                    let res = genStreamOpenAiResp(event, false, model);
+                    controller.enqueue(encoder.encode(`${JSON.stringify(res)}\n\n`));
                 }
             },
         });
         response.body.pipeTo(writable);
+        
         return new Response(readable, {
             status: response.status,
             headers: {
@@ -151,18 +232,24 @@ async function handleMessagesEndpoint(request, api_token) {
     } else {
         try {
             let data = await response.text();
-            return new Response(data, {
+            let res = genOpenAiResp(data,model);
+            console.log(res);
+            //return res;
+            return new Response(JSON.stringify(res), {
                 status: response.status,
                 headers: {
                     "Content-Type": contentType,
                     "Access-Control-Allow-Origin": "*",
                 },
             });
+            
         } catch (error) {
             return createErrorResponse(500, "api_error", "Server Error");
         }
     }
 }
+
+
 
 function createErrorResponse(status, errorType, message) {
     const errorObject = { type: "error", error: { type: errorType, message: message } };
